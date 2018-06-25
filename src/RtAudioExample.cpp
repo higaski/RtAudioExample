@@ -1,239 +1,163 @@
-/******************************************/
-/*
-  playsaw.cpp
-  by Gary P. Scavone, 2006
-
-  This program will output sawtooth waveforms
-  of different frequencies on each channel.
-*/
-/******************************************/
-
-#include "rtaudio/RtAudio.h"
+#include <array>
 #include <iostream>
-#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <cstdint>
+#include <vector>
+#include <rtaudio/RtAudio.h>
+#include "wav_header.hpp"
 
-/*
-typedef char MY_TYPE;
-#define FORMAT RTAUDIO_SINT8
-#define SCALE  127.0
-*/
+/// Length of data
+unsigned int data_length{};
 
-typedef signed short MY_TYPE;
-#define FORMAT RTAUDIO_SINT16
-#define SCALE 32767.0
+/// Raw wav data
+std::vector<uint8_t> raw{};
 
-/*
-typedef S24 MY_TYPE;
-#define FORMAT RTAUDIO_SINT24
-#define SCALE  8388607.0
+/// Pointer to raw wav data
+uint8_t* in;
 
-typedef signed long MY_TYPE;
-#define FORMAT RTAUDIO_SINT32
-#define SCALE  2147483647.0
+/// Read wave data into global variables
+///
+/// \param  path    Filepath
+WavHeader read_wav_data(char const* path) {
+  using namespace std;
+  namespace fs = filesystem;
 
-typedef float MY_TYPE;
-#define FORMAT RTAUDIO_FLOAT32
-#define SCALE  1.0
+  WavHeader wav_header{};
 
-typedef double MY_TYPE;
-#define FORMAT RTAUDIO_FLOAT64
-#define SCALE  1.0
-*/
+  if (auto p{fs::current_path() /= path}; fs::exists(p)) {
+    if (ifstream wav{p, ios::binary}; wav.is_open()) {
+      array<uint8_t, 1024> buf{};
+      wav.read(reinterpret_cast<char*>(begin(buf)), 1024);
+      wav_header = encode_wav_header(begin(buf));
+      data_length = wav_header.data_size;
+      raw.reserve(wav_header.data_size);
+      wav.seekg(wav_header.data_offset);
+      wav.read(reinterpret_cast<char*>(&raw[0]), wav_header.data_size);
+      in = &raw[0];
 
-// Platform-dependent sleep routines.
-#if defined(__WINDOWS_ASIO__) || defined(__WINDOWS_DS__) ||                    \
-    defined(__WINDOWS_WASAPI__)
-#  include <windows.h>
-#  define SLEEP(milliseconds) Sleep((DWORD)milliseconds)
-#else  // Unix variants
-#  include <unistd.h>
-#  define SLEEP(milliseconds) usleep((unsigned long)(milliseconds * 1000.0))
-#endif
+    } else {
+      cout << "can't open file\n";
+      exit(0);
+    }
+  } else {
+    cout << "file not found\n";
+    exit(0);
+  }
 
-#define BASE_RATE 0.005
-#define TIME 1.0
-
-void usage(void) {
-  // Error function in case of incorrect command-line
-  // argument specifications
-  std::cout << "\nuseage: playsaw N fs <device> <channelOffset> <time>\n";
-  std::cout << "    where N = number of channels,\n";
-  std::cout << "    fs = the sample rate,\n";
-  std::cout << "    device = optional device to use (default = 0),\n";
-  std::cout << "    channelOffset = an optional channel offset on the device "
-               "(default = 0),\n";
-  std::cout << "    and time = an optional time duration in seconds (default = "
-               "no limit).\n\n";
-  exit(0);
+  return wav_header;
 }
 
-void errorCallback(RtAudioError::Type type, const std::string& errorText) {
-  // This example error handling function does exactly the same thing
-  // as the embedded RtAudio::error() function.
-  std::cout << "in errorCallback" << std::endl;
-  if (type == RtAudioError::WARNING)
-    std::cerr << '\n' << errorText << "\n\n";
-  else if (type != RtAudioError::WARNING)
-    throw(RtAudioError(errorText, type));
-}
+/// RtAudio callback
+///
+/// \param  outputBuffer    Destination
+/// \param  inputBuffer     Source
+/// \param  nFrames         Samples per buffer
+/// \param  streamTime      Unused
+/// \param  status          Unused
+/// \param  userData        Wav header
+/// \return 0               Continue
+/// \return 1               Stop stream, drain output
+/// \return 2               Abort immediately
+static int rtCallback(void* outputBuffer,
+                      void* inputBuffer,
+                      unsigned int nFrames,
+                      double streamTime,
+                      RtAudioStreamStatus status,
+                      void* userData) {
+  WavHeader* wav_header{reinterpret_cast<WavHeader*>(userData)};
 
-unsigned int channels;
-RtAudio::StreamOptions options;
-unsigned int frameCounter = 0;
-bool checkCount = false;
-unsigned int nFrames = 0;
-const unsigned int callbackReturnValue = 1;
+  unsigned int n{data_length >= nFrames ? nFrames : data_length};
 
-//#define USE_INTERLEAVED
-#if defined(USE_INTERLEAVED)
+  // 8 bit
+  if (wav_header->bit_depth == 8) {
+    uint8_t* out{reinterpret_cast<uint8_t*>(outputBuffer)};
 
-// Interleaved buffers
-int saw(void* outputBuffer,
-        void* inputBuffer,
-        unsigned int nBufferFrames,
-        double streamTime,
-        RtAudioStreamStatus status,
-        void* data) {
-  unsigned int i, j;
-  extern unsigned int channels;
-  MY_TYPE* buffer = (MY_TYPE*)outputBuffer;
-  double* lastValues = (double*)data;
+    // Assuming 8 bit is always mono
+    for (auto i{0ul}; i < n; ++i) {
+      *out++ = (*in++) - 128;  // RtAudio does not support uint8_t...
+      data_length--;
+    }
+    // 16 bit
+  } else if (wav_header->bit_depth == 16) {
+    int16_t* out{reinterpret_cast<int16_t*>(outputBuffer)};
+    int16_t* in_cpy{reinterpret_cast<int16_t*>(in)};
 
-  if (status)
-    std::cout << "Stream underflow detected!" << std::endl;
-
-  for (i = 0; i < nBufferFrames; i++) {
-    for (j = 0; j < channels; j++) {
-      *buffer++ = (MY_TYPE)(lastValues[j] * SCALE * 0.5);
-      lastValues[j] += BASE_RATE * (j + 1 + (j * 0.1));
-      if (lastValues[j] >= 1.0)
-        lastValues[j] -= 2.0;
+    // Assuming 16 bit is stereo
+    for (auto i{0ul}; i < n; ++i) {
+      *out++ = *in_cpy++;
+      *out++ = *in_cpy++;
+      data_length -= 4;
+      in += 4;
     }
   }
 
-  frameCounter += nBufferFrames;
-  if (checkCount && (frameCounter >= nFrames))
-    return callbackReturnValue;
-  return 0;
+  return n == nFrames ? 0 : 1;
 }
 
-#else  // Use non-interleaved buffers
-
-int saw(void* outputBuffer,
-        void* /*inputBuffer*/,
-        unsigned int nBufferFrames,
-        double /*streamTime*/,
-        RtAudioStreamStatus status,
-        void* data) {
-  unsigned int i, j;
-  extern unsigned int channels;
-  MY_TYPE* buffer = (MY_TYPE*)outputBuffer;
-  double* lastValues = (double*)data;
-
-  if (status)
-    std::cout << "Stream underflow detected!" << std::endl;
-
-  double increment;
-  for (j = 0; j < channels; j++) {
-    increment = BASE_RATE * (j + 1 + (j * 0.1));
-    for (i = 0; i < nBufferFrames; i++) {
-      *buffer++ = (MY_TYPE)(lastValues[j] * SCALE * 0.5);
-      lastValues[j] += increment;
-      if (lastValues[j] >= 1.0)
-        lastValues[j] -= 2.0;
-    }
-  }
-
-  frameCounter += nBufferFrames;
-  if (checkCount && (frameCounter >= nFrames))
-    return callbackReturnValue;
-  return 0;
-}
-#endif
-
+/// Main
+///
+/// \param  argv    Filepath
+/// \return Exit
 int main(int argc, char* argv[]) {
-  unsigned int bufferFrames, fs, device = 0, offset = 0;
+  using namespace std;
 
-  // minimal command-line checking
-  if (argc < 3 || argc > 6)
-    usage();
+  // Not enough arguments
+  if (argc < 2) {
+    cout << "useage: PortAudioExample <path>\n";
+    exit(0);
+  }
 
-  RtAudio dac;
-  if (dac.getDeviceCount() < 1) {
+  // Read .wav header
+  auto wav_header{read_wav_data(argv[1])};
+
+  // Create RtAudio instance
+  RtAudio audio;
+
+  // Check if audio device is available
+  if (audio.getDeviceCount() < 1) {
     std::cout << "\nNo audio devices found!\n";
     exit(1);
   }
 
-  channels = (unsigned int)atoi(argv[1]);
-  fs = (unsigned int)atoi(argv[2]);
-  if (argc > 3)
-    device = (unsigned int)atoi(argv[3]);
-  if (argc > 4)
-    offset = (unsigned int)atoi(argv[4]);
-  if (argc > 5)
-    nFrames = (unsigned int)(fs * atof(argv[5]));
-  if (nFrames > 0)
-    checkCount = true;
+  // Let RtAudio print messages to stderr
+  audio.showWarnings(true);
 
-  double* data = (double*)calloc(channels, sizeof(double));
-
-  // Let RtAudio print messages to stderr.
-  dac.showWarnings(true);
-
-  // Set our stream parameters for output only.
-  bufferFrames = 512;
+  // Set stream parameters
+  unsigned int bufferFrames{256};
   RtAudio::StreamParameters oParams;
-  oParams.deviceId = device;
-  oParams.nChannels = channels;
-  oParams.firstChannel = offset;
+  oParams.deviceId = audio.getDefaultOutputDevice();
+  oParams.nChannels = wav_header.channels;
+  oParams.firstChannel = 0;
 
-  if (device == 0)
-    oParams.deviceId = dac.getDefaultOutputDevice();
-
-  options.flags = RTAUDIO_HOG_DEVICE;
+  RtAudio::StreamOptions options;
   options.flags |= RTAUDIO_SCHEDULE_REALTIME;
-#if !defined(USE_INTERLEAVED)
-  options.flags |= RTAUDIO_NONINTERLEAVED;
-#endif
+
   try {
-    dac.openStream(&oParams,
-                   NULL,
-                   FORMAT,
-                   fs,
-                   &bufferFrames,
-                   &saw,
-                   (void*)data,
-                   &options,
-                   &errorCallback);
-    dac.startStream();
+    // Open stream
+    audio.openStream(&oParams,
+                     NULL,  // No input
+                     wav_header.bit_depth == 8 ? RTAUDIO_SINT8 : RTAUDIO_SINT16,
+                     wav_header.sample_rate,
+                     &bufferFrames,
+                     &rtCallback,
+                     &wav_header,
+                     &options,
+                     NULL);  // No error callback
+
+    // Start stream
+    audio.startStream();
   } catch (RtAudioError& e) {
     e.printMessage();
     goto cleanup;
   }
 
-  if (checkCount) {
-    while (dac.isStreamRunning() == true)
-      SLEEP(100);
-  } else {
-    char input;
-    // std::cout << "Stream latency = " << dac.getStreamLatency() << "\n" <<
-    // std::endl;
-    std::cout << "\nPlaying ... press <enter> to quit (buffer size = "
-              << bufferFrames << ").\n";
-    std::cin.get(input);
-
-    try {
-      // Stop the stream
-      dac.stopStream();
-    } catch (RtAudioError& e) {
-      e.printMessage();
-    }
-  }
+  while (data_length)
+    asm volatile("nop");
 
 cleanup:
-  if (dac.isStreamOpen())
-    dac.closeStream();
-  free(data);
+  if (audio.isStreamOpen())
+    audio.closeStream();
 
   return 0;
 }
