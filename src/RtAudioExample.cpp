@@ -1,10 +1,14 @@
 #include <array>
-#include <iostream>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
-#include <cstdint>
+#include <iostream>
 #include <vector>
-#include <rtaudio/RtAudio.h>
+
+// RtAudio installs its headers to CMAKE_INSTALL_INCLUDEDIR... which is fuckimg
+// empty -.-
+#include "../external/rtaudio/RtAudio.h"
+
 #include "wav_header.hpp"
 
 /// Length of data
@@ -65,13 +69,13 @@ static int rtCallback(void* outputBuffer,
                       double streamTime,
                       RtAudioStreamStatus status,
                       void* userData) {
-  WavHeader* wav_header{reinterpret_cast<WavHeader*>(userData)};
+  WavHeader* wav_header{static_cast<WavHeader*>(userData)};
 
   unsigned int n{data_length >= nFrames ? nFrames : data_length};
 
   // 8 bit
   if (wav_header->bit_depth == 8) {
-    uint8_t* out{reinterpret_cast<uint8_t*>(outputBuffer)};
+    uint8_t* out{static_cast<uint8_t*>(outputBuffer)};
 
     // Assuming 8 bit is always mono
     for (auto i{0ul}; i < n; ++i) {
@@ -80,7 +84,9 @@ static int rtCallback(void* outputBuffer,
     }
     // 16 bit
   } else if (wav_header->bit_depth == 16) {
-    int16_t* out{reinterpret_cast<int16_t*>(outputBuffer)};
+    int16_t* out{static_cast<int16_t*>(outputBuffer)};
+
+    // THIS IS UB! DONT do that in production
     int16_t* in_cpy{reinterpret_cast<int16_t*>(in)};
 
     // Assuming 16 bit is stereo
