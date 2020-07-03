@@ -5,9 +5,8 @@
 #include <iostream>
 #include <vector>
 
-// RtAudio installs its headers to CMAKE_INSTALL_INCLUDEDIR... which is fuckimg
-// empty -.-
-#include "../external/rtaudio/RtAudio.h"
+// RtAudio installs its headers to CMAKE_INSTALL_INCLUDEDIR...
+#include "RtAudio.h"
 
 #include "wav_header.hpp"
 
